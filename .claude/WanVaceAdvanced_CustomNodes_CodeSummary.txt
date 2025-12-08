@@ -1,0 +1,270 @@
+# WanVaceAdvanced Custom Nodes - Technical Summary
+
+## Overview
+
+The WanVaceAdvanced custom node pack extends ComfyUI's native WAN VACE (Video Attention Control Engine) implementation with advanced per-frame strength control capabilities. VACE is Alibaba's regional video editing technology that enables precise mask-based control over specific areas in video generation.
+
+## Core Architecture Comparison
+
+### Native ComfyUI WAN VACE Implementation
+Location: `/comfy/ldm/wan/model.py` and `/comfy_extras/nodes_wan.py`
+
+The native implementation provides:
+- `VaceWanModel` class: Base diffusion model with VACE layers
+- `WanFunControlToVideo` node: Basic VACE control with single strength parameter
+- Simple forward pass with uniform strength application
+- Fixed strength value for all frames and regions
+
+### WanVaceAdvanced Custom Implementation
+Location: `/custom_nodes/ComfyUI-WanVaceAdvanced/`
+
+Key enhancements over native:
+1. **Per-frame strength control**: Individual strength values for each frame
+2. **Dual VACE inputs**: Support for two simultaneous VACE control regions
+3. **Phantom frame compatibility**: Extra frames for enhanced temporal consistency
+4. **Reference/control frame separation**: Different strength values for reference vs control frames
+5. **Advanced patching system**: Runtime model modification for dynamic behavior
+
+## Key Implementation Differences
+
+### 1. Strength Application Methods
+
+**Native ComfyUI (uniform strength):**
+```python
+# From VaceWanModel.forward_orig() in /comfy/ldm/wan/model.py
+for i, block in enumerate(self.blocks):
+    ii = self.vace_layers_mapping.get(i, None)
+    if ii is not None:
+        for iii in range(len(c)):
+            c_skip, c[iii] = self.vace_blocks[ii](c[iii], x=x_orig, ...)
+            # Simple uniform strength application
+            x += c_skip * vace_strength[iii]
+```
+
+**WanVaceAdvanced (per-frame strength):**
+```python
+# From patches.py _apply_separate_strengths()
+def _apply_separate_strengths(x, c_skip, strength_list, reference_frames=0, phantom_frames=0):
+    # Apply element-wise strengths to reference frames
+    for i, strength in enumerate(reference_strengths):
+        start_idx = i * patches_per_frame
+        end_idx = min((i + 1) * patches_per_frame, reference_seq_length)
+        weighted_ref[:, start_idx:end_idx, :] = ref_portion[:, start_idx:end_idx, :] * strength
+
+    # Apply element-wise strengths to control frames
+    for i, strength in enumerate(control_strengths):
+        start_idx = i * patches_per_frame
+        end_idx = min((i + 1) * patches_per_frame, control_seq_length)
+        weighted_ctrl[:, start_idx:end_idx, :] = ctrl_portion[:, start_idx:end_idx, :] * strength
+```
+
+### 2. Conditioning Structure
+
+**Native ComfyUI:**
+```python
+# Simple conditioning with single VACE context
+positive = node_helpers.conditioning_set_values(positive, {
+    "concat_latent_image": concat_latent,
+    "vace_context": vace_encoded,
+    "vace_strength": [1.0]  # Single strength value
+})
+```
+
+**WanVaceAdvanced:**
+```python
+# Complex conditioning with multiple VACE contexts and strength lists
+cond["vace_context"] = torch.cat(vace_frames_list, dim=0)
+cond["vace_mask"] = torch.cat(vace_mask_list, dim=0) if has_mask else None
+cond["vace_strength"] = vace_strength_list  # List of lists for per-frame control
+# Example strength list structure:
+# [[1.0, 0.9, 0.8, ...],  # Batch 0: per-frame strengths
+#  [1.0, 0.9, 0.8, ...]]  # Batch 1: per-frame strengths
+```
+
+### 3. Model Patching System
+
+**WanVaceAdvanced Unique Feature - Runtime Model Wrapping:**
+```python
+def wrap_vace_phantom_wan_model(model):
+    """Patch a VaceWanModel to support per-frame strength and Phantom embeds."""
+
+    def unet_wrapper_function(model_function, kwargs):
+        # Check if we have nested strength lists (per-frame control)
+        use_patched_forward = (
+            isinstance(vace_strength, list) and
+            len(vace_strength) > 0 and
+            isinstance(vace_strength[0], list)
+        )
+
+        if use_patched_forward:
+            # Replace forward_orig with custom implementation
+            diffusion_model.forward_orig = types.MethodType(_vaceph_forward_orig, diffusion_model)
+            try:
+                out = model_function(input_data, timestep, **c)
+            finally:
+                # Restore original forward
+                diffusion_model.forward_orig = original_forward
+
+    model.set_model_unet_function_wrapper(unet_wrapper_function)
+```
+
+## Code Examples
+
+### Example 1: Basic VACE Encoding with Dual Controls
+```python
+# From vace_custom_nodes.py - WanVacePhantomDual node
+def encode(self, positive, negative, vae, width, height, length, batch_size,
+           vace_strength=1.0, vace_strength2=1.0,
+           control_video=None, control_video2=None,
+           control_masks=None, control_masks2=None):
+
+    # Process two separate VACE control regions
+    return encode_vace_advanced(
+        positive, negative, vae, width, height, length, batch_size,
+        vace_strength_1=vace_strength,
+        vace_strength_2=vace_strength2,
+        control_video_1=control_video,
+        control_masks_1=control_masks,
+        control_video_2=control_video2,
+        control_masks_2=control_masks2
+    )
+```
+
+### Example 2: Creating Per-Frame Strength Lists
+```python
+# From vace_encoding.py - strength list generation
+def _create_strength_list(base_strength, num_frames, reference_frames=0):
+    """Create a list of strength values for each frame."""
+    strength_list = []
+
+    # Reference frames get full strength
+    for i in range(reference_frames):
+        strength_list.append(base_strength)
+
+    # Control frames can have varying strength
+    for i in range(num_frames - reference_frames):
+        # Example: gradually decrease strength over time
+        frame_strength = base_strength * (1.0 - i * 0.01)
+        strength_list.append(max(0.1, frame_strength))
+
+    return strength_list
+```
+
+### Example 3: Reconciling Multiple VACE Embeddings
+```python
+# From vace_encoding.py - _reconcile_vace_embedding_lengths()
+def _reconcile_vace_embedding_lengths(vace_frames_list, vace_mask_list, vace_strength_list):
+    """Ensure all VACE embeddings have matching temporal dimensions."""
+
+    # Find maximum frame count
+    max_frames = max(frames.shape[2] for frames in vace_frames_list if frames is not None)
+
+    for i, (frames, mask, strengths) in enumerate(zip(vace_frames_list, vace_mask_list, vace_strength_list)):
+        frames_to_pad = max_frames - frames.shape[2]
+
+        if frames_to_pad > 0:
+            # Pad frames with processed zeros (using Wan21 latent format)
+            padding = comfy.latent_formats.Wan21().process_out(
+                torch.zeros([frames.shape[0], 16, frames_to_pad, frames.shape[3], frames.shape[4]])
+            )
+            # Concatenate inactive and reactive channels
+            padding_encoded = torch.cat([padding, padding], dim=1)  # 32 channels total
+            padded_frames = torch.cat([padding_encoded, frames], dim=2)
+
+            # Pad strength lists to match
+            padded_strengths = [[batch_strengths[0]] * frames_to_pad + batch_strengths
+                               for batch_strengths in strengths]
+```
+
+### Example 4: Phantom Frame Integration
+```python
+# From vace_encoding.py - Phantom frame handling
+if phantom_images is not None:
+    # Encode phantom images
+    phantom_encoded = vae.encode(phantom_images[:, :, :, :3])
+
+    # Create inactive channel (masked region)
+    phantom_inactive = torch.ones_like(phantom_encoded) * phantom_control_value
+    phantom_inactive = comfy.latent_formats.Wan21().process_out(phantom_inactive)
+
+    # Concatenate inactive and reactive channels
+    phantom_vace = torch.cat([phantom_inactive, phantom_encoded], dim=1)
+
+    # Add to VACE frames list with specific strength
+    vace_frames_list.append(phantom_vace)
+    vace_strength_list.append([[phantom_vace_strength] * phantom_encoded.shape[2]])
+```
+
+## Technical Innovations
+
+### 1. Dynamic Model Patching
+The custom implementation uses runtime model patching to modify behavior without permanently changing the model. This allows for:
+- Per-request behavior modification
+- Clean restoration after execution
+- No permanent side effects on the model
+
+### 2. Multi-Region VACE Control
+Unlike the native single VACE input, WanVaceAdvanced supports:
+- Dual VACE regions with independent masks and strengths
+- Phantom frames for temporal consistency
+- Reference frame separation with distinct strength control
+
+### 3. Frame-Level Granularity
+The strength list structure enables:
+- Individual strength per frame
+- Different strengths for reference vs control frames
+- Gradual strength transitions over time
+- Complex temporal strength patterns
+
+### 4. Latent Space Reconciliation
+The reconciliation system ensures:
+- All VACE embeddings have matching dimensions
+- Proper padding with latent-space appropriate values
+- Strength list synchronization with padded frames
+- Maintains 32-channel structure (16 inactive + 16 reactive)
+
+## Usage Patterns
+
+### Basic Usage (Native)
+```python
+# Single strength for all frames
+node = WanFunControlToVideo()
+positive, negative, latent = node.execute(
+    positive, negative, vae,
+    width=832, height=480, length=81,
+    control_video=my_video
+)
+```
+
+### Advanced Usage (WanVaceAdvanced)
+```python
+# Per-frame strength with dual controls
+node = WanVacePhantomDual()
+positive, negative, neg_phantom, latent, trim = node.encode(
+    positive, negative, vae,
+    width=832, height=480, length=81,
+    control_video=region1_video,
+    control_masks=region1_mask,
+    vace_strength=1.0,  # Can be a list for per-frame
+    control_video2=region2_video,
+    control_masks2=region2_mask,
+    vace_strength2=0.5,
+    phantom_images=consistency_frames
+)
+```
+
+## Key Differences Summary
+
+| Feature | Native ComfyUI | WanVaceAdvanced |
+|---------|---------------|-----------------|
+| Strength Control | Single value for all frames | Per-frame strength lists |
+| VACE Inputs | Single control video | Dual control videos + phantom |
+| Model Patching | No runtime patching | Dynamic forward() replacement |
+| Reference Frames | Basic support | Separate strength control |
+| Mask Support | Single mask | Dual masks with reconciliation |
+| Temporal Control | Uniform | Frame-level granularity |
+| Memory Efficiency | Standard | Tiled VAE encoding option |
+
+## Conclusion
+
+WanVaceAdvanced significantly extends the native ComfyUI WAN VACE implementation by adding fine-grained temporal control, multi-region support, and dynamic model patching. The key innovation is the per-frame strength control system that enables complex temporal patterns and precise regional control in video generation workflows.

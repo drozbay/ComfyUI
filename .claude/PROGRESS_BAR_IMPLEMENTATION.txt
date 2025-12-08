@@ -1,0 +1,119 @@
+PROGRESS BAR IMPLEMENTATION GUIDE FOR COMFYUI CUSTOM NODES
+===========================================================
+
+SUMMARY
+-------
+We successfully implemented a progress bar for the SimpleDetectorForAnimateDiff node 
+to show progress when processing video frames. The solution uses ComfyUI's built-in 
+ProgressBar utility from comfy.utils.
+
+IMPLEMENTATION DETAILS
+----------------------
+
+1. IMPORT REQUIREMENT:
+   Add this import at the top of your module:
+   ```python
+   import comfy.utils
+   ```
+
+2. BASIC USAGE PATTERN:
+   ```python
+   # Create a progress bar with total number of steps
+   pbar = comfy.utils.ProgressBar(total_steps)
+   
+   # Update the progress bar as you complete each step
+   for i in range(total_steps):
+       # ... do your processing ...
+       pbar.update(1)  # Update by 1 step (or any increment)
+   ```
+
+3. ACTUAL IMPLEMENTATION EXAMPLE:
+   From SimpleDetectorForAnimateDiff.detect() in modules/impact/detectors.py:
+   
+   ```python
+   def detect(self, image_frames, bbox_detector, crop_factor, drop_size, 
+              sub_threshold, threshold, dilation, detection_hint,
+              masking_mode, segs_pivot, mask_combined_method=None, 
+              mask_merge_method=None, mask_merge_factor=1.0):
+       
+       total_frames = len(image_frames)
+       
+       # Create progress bar with total frame count
+       pbar = comfy.utils.ProgressBar(total_frames)
+       
+       # Process each frame
+       segs_by_frames = []
+       for i, image in enumerate(image_frames):
+           image = image.unsqueeze(0)
+           # ... detection processing ...
+           segs_by_frames.append(segs)
+           
+           # Update progress bar after each frame
+           pbar.update(1)
+   ```
+
+4. KEY POINTS:
+   - The ProgressBar automatically handles the display in ComfyUI's UI
+   - It integrates with ComfyUI's execution system
+   - No need to manually handle progress display or cleanup
+   - The progress updates are sent to the frontend via ComfyUI's internal messaging
+
+5. WHEN TO USE:
+   - Long-running loops (e.g., processing video frames)
+   - Batch operations where you know the total count upfront
+   - Any operation that takes more than a few seconds
+
+6. WHAT DIDN'T WORK:
+   Initially tried using `update_node_status` from the execution module, but this
+   approach failed. The comfy.utils.ProgressBar is the correct solution.
+
+7. MINIMAL WORKING EXAMPLE:
+   ```python
+   import comfy.utils
+   
+   class MyNode:
+       def process(self, items):
+           total = len(items)
+           pbar = comfy.utils.ProgressBar(total)
+           
+           results = []
+           for i, item in enumerate(items):
+               # Do processing
+               result = self.process_single(item)
+               results.append(result)
+               
+               # Update progress
+               pbar.update(1)
+           
+           return results
+   ```
+
+8. ADVANCED USAGE:
+   You can update by more than 1 if processing in batches:
+   ```python
+   batch_size = 10
+   pbar = comfy.utils.ProgressBar(total_items)
+   
+   for batch_start in range(0, total_items, batch_size):
+       batch_end = min(batch_start + batch_size, total_items)
+       # Process batch...
+       pbar.update(batch_end - batch_start)
+   ```
+
+IMPORTANT NOTES
+---------------
+- The progress bar is automatically displayed in the ComfyUI interface
+- No cleanup is required - it's handled automatically
+- The progress updates are real-time and visible to the user
+- This works for both standalone nodes and nodes within complex workflows
+
+REFERENCE
+---------
+Original implementation location:
+- File: modules/impact/detectors.py
+- Class: SimpleDetectorForAnimateDiff
+- Method: detect()
+- Lines: ~411-430 (may vary with updates)
+
+The implementation was based on examining how ComfyUI's built-in Canny edge 
+detection node (comfy_extras/nodes_canny.py) uses the same ProgressBar utility.

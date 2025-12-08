@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(git log:*)",
+      "Bash(tree:*)",
+      "Bash(cat:*)"
+    ]
+  },
+  "enableAllProjectMcpServers": false,
+  "outputStyle": "default"
+}

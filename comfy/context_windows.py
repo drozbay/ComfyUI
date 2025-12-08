@@ -76,7 +76,7 @@ class IndexListContextWindow(ContextWindowABC):
         idx = tuple([slice(None)] * dim + [self.index_list])
         full[idx] += to_add
         return full
-
+    
     def get_region_index(self, num_regions: int) -> int:
         region_idx = int(self.center_ratio * num_regions)
         return min(max(region_idx, 0), num_regions - 1)
@@ -142,7 +142,7 @@ class IndexListContextHandler(ContextHandlerABC):
         # if multiple conds, split based on primary region
         if self.split_conds_to_windows and len(cond_in) > 1:
             region = window.get_region_index(len(cond_in))
-            logging.info(f"Splitting conds to windows; using region {region} for window {window[0]}-{window[-1]} with center ratio {window.center_ratio:.3f}")
+            #logging.info(f"Splitting conds to windows; using region {region} for window {window[0]}-{window[-1]} with center ratio {window.center_ratio:.3f}")
             cond_in = [cond_in[region]]
         # cond object is a list containing a dict - outer list is irrelevant, so just loop through it
         for actual_cond in cond_in:
@@ -170,11 +170,96 @@ class IndexListContextHandler(ContextHandlerABC):
                                 if (self.dim < cond_value.ndim and cond_value(self.dim) == x_in.size(self.dim)) or \
                                    (cond_value.ndim < self.dim and cond_value.size(0) == x_in.size(self.dim)):
                                     new_cond_item[cond_key] = window.get_tensor(cond_value, device)
+                            # Handle list of tensors (e.g., vace_frames, vace_mask)
+                            elif isinstance(cond_value, list) and len(cond_value) > 0:
+                                if isinstance(cond_value[0], torch.Tensor):
+                                    sliced_list = []
+                                    for tensor in cond_value:
+                                        if self.dim < tensor.ndim and tensor.size(self.dim) == x_in.size(self.dim):
+                                            sliced_list.append(window.get_tensor(tensor, device, dim=self.dim))
+                                        else:
+                                            sliced_list.append(tensor.to(device) if device else tensor)
+                                    new_cond_item[cond_key] = sliced_list
+                                elif isinstance(cond_value[0], (int, float)):
+                                    if len(cond_value) == x_in.size(self.dim):
+                                        new_cond_item[cond_key] = [cond_value[i] for i in window.index_list]
+                                    else:
+                                        new_cond_item[cond_key] = cond_value
+                                elif isinstance(cond_value[0], list):
+                                    # If list of lists, slice each inner list
+                                    sliced_list = []
+                                    for inner_list in cond_value:
+                                        if len(inner_list) == x_in.size(self.dim):
+                                            sliced_list.append([inner_list[i] for i in window.index_list])
+                                        else:
+                                            sliced_list.append(inner_list)
+                                    new_cond_item[cond_key] = sliced_list
                             # Handle audio_embed (temporal dim is 1)
                             elif cond_key == "audio_embed" and hasattr(cond_value, "cond") and isinstance(cond_value.cond, torch.Tensor):
                                 audio_cond = cond_value.cond
                                 if audio_cond.ndim > 1 and audio_cond.size(1) == x_in.size(self.dim):
                                     new_cond_item[cond_key] = cond_value._copy_with(window.get_tensor(audio_cond, device, dim=1))
+                            # Handle vace_context
+                            elif cond_key == "vace_context" and hasattr(cond_value, "cond") and isinstance(cond_value.cond, torch.Tensor):
+                                vace_cond = cond_value.cond
+                                x_temporal = x_in.size(self.dim)
+                                vace_temporal = vace_cond.size(3)
+
+                                # Detect phantom (time_dim_concat present AND vace_context extended)
+                                has_time_dim_concat = "time_dim_concat" in new_cond_item
+                                has_extended_vace = vace_temporal > x_temporal
+
+                                if vace_cond.ndim > 3:
+                                    if has_time_dim_concat and has_extended_vace:
+                                        # Phantom: split vace_context into [main] + [phantom], slice main, re-append phantom
+                                        T_phantom = vace_temporal - x_temporal
+                                        vace_main = vace_cond[:, :, :, :-T_phantom, :, :]
+                                        vace_phantom = vace_cond[:, :, :, -T_phantom:, :, :].to(device)
+                                        sliced_main = window.get_tensor(vace_main, device, dim=3)
+
+                                        # Inject reference latent for windows not starting at frame 0
+                                        if window.index_list[0] != 0:
+                                            sliced_main = sliced_main.clone()
+                                            reference_latent = vace_main[:, :, :32, :1, :, :].to(device)
+                                            sliced_main[:, :, :32, :1, :, :] = reference_latent
+
+                                        sliced_vace = torch.cat([sliced_main, vace_phantom], dim=3)
+                                        new_cond_item[cond_key] = cond_value._copy_with(sliced_vace)
+
+                                    elif vace_temporal == x_temporal:
+                                        # Standard VACE (no phantom)
+                                        sliced_vace = window.get_tensor(vace_cond, device, dim=3)
+
+                                        # Inject reference latent for windows not starting at frame 0
+                                        if window.index_list[0] != 0:
+                                            sliced_vace = sliced_vace.clone()
+                                            reference_latent = vace_cond[:, :, :32, :1, :, :].to(device)
+                                            sliced_vace[:, :, :32, :1, :, :] = reference_latent
+
+                                        new_cond_item[cond_key] = cond_value._copy_with(sliced_vace)
+                            # Handle CONDConstant wrapping a list (e.g., vace_strength)
+                            elif hasattr(cond_value, "cond") and isinstance(cond_value.cond, list) and len(cond_value.cond) > 0:
+                                inner_list = cond_value.cond
+                                if isinstance(inner_list[0], (int, float)):
+                                    if len(inner_list) == x_in.size(self.dim):
+                                        new_cond_item[cond_key] = cond_value._copy_with([inner_list[i] for i in window.index_list])
+                                elif isinstance(inner_list[0], list):
+                                    # List of lists
+                                    x_temporal = x_in.size(self.dim)
+                                    sliced_list = []
+                                    for sub_list in inner_list:
+                                        if len(sub_list) > x_temporal:
+                                            # Phantom: slice main portion, preserve phantom at end
+                                            T_phantom = len(sub_list) - x_temporal
+                                            main_strengths = sub_list[:-T_phantom]
+                                            phantom_strengths = sub_list[-T_phantom:]
+                                            sliced_main = [main_strengths[i] for i in window.index_list]
+                                            sliced_list.append(sliced_main + phantom_strengths)
+                                        elif len(sub_list) == x_temporal:
+                                            sliced_list.append([sub_list[i] for i in window.index_list])
+                                        else:
+                                            sliced_list.append(sub_list)
+                                    new_cond_item[cond_key] = cond_value._copy_with(sliced_list)
                             # if has cond that is a Tensor, check if needs to be subset
                             elif hasattr(cond_value, "cond") and isinstance(cond_value.cond, torch.Tensor):
                                 if  (self.dim < cond_value.cond.ndim and cond_value.cond.size(self.dim) == x_in.size(self.dim)) or \
@@ -192,7 +277,7 @@ class IndexListContextHandler(ContextHandlerABC):
         return resized_cond
 
     def set_step(self, timestep: torch.Tensor, model_options: dict[str]):
-        mask = torch.isclose(model_options["transformer_options"]["sample_sigmas"], timestep[0], rtol=0.0001)
+        mask = torch.isclose(model_options["transformer_options"]["sample_sigmas"], timestep, rtol=0.0001)
         matches = torch.nonzero(mask)
         if torch.numel(matches) == 0:
             raise Exception("No sample_sigmas matched current timestep; something went wrong.")
@@ -324,7 +409,7 @@ def _sampler_sample_wrapper(executor, guider, sigmas, extra_args, callback, nois
         raise Exception("context_handler not found in sampler_sample_wrapper; this should never happen, something went wrong.")
     if not handler.freenoise:
         return executor(guider, sigmas, extra_args, callback, noise, *args, **kwargs)
-    noise = apply_freenoise(noise, handler.dim, handler.context_length, handler.context_overlap, extra_args["seed"])
+    noise = apply_freenoise(noise, handler.context_length, handler.context_overlap, extra_args["seed"])
 
     return executor(guider, sigmas, extra_args, callback, noise, *args, **kwargs)
 
@@ -591,26 +676,24 @@ def shift_window_to_end(window: list[int], num_frames: int):
 
 
 # https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved/blob/90fb1331201a4b29488089e4fbffc0d82cc6d0a9/animatediff/sample_settings.py#L465
-def apply_freenoise(noise: torch.Tensor, dim: int, context_length: int, context_overlap: int, seed: int):
+def apply_freenoise(noise: torch.Tensor, context_length: int, context_overlap: int, seed: int):
     logging.info("Context windows: Applying FreeNoise")
-    generator = torch.Generator(device='cpu').manual_seed(seed)
-    latent_video_length = noise.shape[dim]
+    generator = torch.manual_seed(seed)
+    latent_video_length = noise.shape[2]
     delta = context_length - context_overlap
-
-    for start_idx in range(0, latent_video_length - context_length, delta):
+    for start_idx in range(0, latent_video_length-context_length, delta):
         place_idx = start_idx + context_length
-
-        actual_delta = min(delta, latent_video_length - place_idx)
-        if actual_delta <= 0:
+        if place_idx >= latent_video_length:
             break
+        end_idx = place_idx - 1
 
-        list_idx = torch.randperm(actual_delta, generator=generator, device='cpu') + start_idx
-
-        source_slice = [slice(None)] * noise.ndim
-        source_slice[dim] = list_idx
-        target_slice = [slice(None)] * noise.ndim
-        target_slice[dim] = slice(place_idx, place_idx + actual_delta)
-
-        noise[tuple(target_slice)] = noise[tuple(source_slice)]
-
+        if end_idx + delta >= latent_video_length:
+            final_delta = latent_video_length - place_idx
+            list_idx = torch.tensor(list(range(start_idx,start_idx+final_delta)), device=torch.device("cpu"), dtype=torch.long)
+            list_idx = list_idx[torch.randperm(final_delta, generator=generator)]
+            noise[:, :, place_idx:place_idx + final_delta] = noise[:, :, list_idx]
+            break
+        list_idx = torch.tensor(list(range(start_idx,start_idx+delta)), device=torch.device("cpu"), dtype=torch.long)
+        list_idx = list_idx[torch.randperm(delta, generator=generator)]
+        noise[:, :, place_idx:place_idx + delta] = noise[:, :, list_idx]
     return noise

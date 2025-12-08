@@ -1,0 +1,1 @@
+Only the ComfyUI-WanVaceAdvanced and drozpack are my own repositories. Between those, only ComfyUI-WanVaceAdvanced is published publically. All of the others are by other authors, although I contribute a lot to the RES4LYF node pack.
