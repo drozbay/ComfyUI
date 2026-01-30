@@ -148,6 +148,16 @@ class IndexListContextHandler(ContextHandlerABC):
         # cond object is a list containing a dict - outer list is irrelevant, so just loop through it
         for actual_cond in cond_in:
             resized_actual_cond = actual_cond.copy()
+            # Track if we injected a reference latent at position 0, and store the latent for c_concat
+            injected_ref_at_pos0 = False
+            injected_ref_latent = None
+            # Log conditioning keys for first step only to reduce spam
+            if self._step == 0:
+                logging.info(f"[ContextWindowRefs] Window [{window.index_list[0]}-{window.index_list[-1]}] cond keys: {list(actual_cond.keys())}")
+                if "concat_latent_image" in actual_cond:
+                    logging.info(f"[ContextWindowRefs]   concat_latent_image shape: {actual_cond['concat_latent_image'].shape}")
+                if "concat_mask" in actual_cond:
+                    logging.info(f"[ContextWindowRefs]   concat_mask shape: {actual_cond['concat_mask'].shape}, pos0 mean: {actual_cond['concat_mask'][:, :, 0:1].mean().item():.4f}")
             # now we are in the inner dict - "pooled_output" is a tensor, "control" is a ControlBase object, "model_conds" is dictionary
             for key in actual_cond:
                 try:
@@ -162,9 +172,37 @@ class IndexListContextHandler(ContextHandlerABC):
                             if key == "concat_latent_image" and self._context_window_ref_latents is not None:
                                 if window.index_list[0] != 0:
                                     num_refs = self._context_window_ref_latents.shape[0]
-                                    region_idx = window.get_region_index(num_refs)
-                                    ref_latent = self._context_window_ref_latents[region_idx:region_idx+1].to(device)
+
+                                    if self._context_window_mix_latents and num_refs > 1:
+                                        # Blend between adjacent reference latents based on position
+                                        pos = window.center_ratio * num_refs
+                                        lower_idx = int(pos)
+                                        upper_idx = min(lower_idx + 1, num_refs - 1)
+                                        blend_factor = pos - lower_idx
+
+                                        lower_latent = self._context_window_ref_latents[lower_idx:lower_idx+1].to(device)
+                                        upper_latent = self._context_window_ref_latents[upper_idx:upper_idx+1].to(device)
+                                        ref_latent = lower_latent * (1.0 - blend_factor) + upper_latent * blend_factor
+
+                                        if self._step == 0:
+                                            logging.info(f"[ContextWindowRefs] Window [{window.index_list[0]}-{window.index_list[-1]}]: Blending ref latents {lower_idx}+{upper_idx} (factor={blend_factor:.3f}) at pos 0")
+                                    else:
+                                        # Discrete selection of reference latent
+                                        region_idx = window.get_region_index(num_refs)
+                                        ref_latent = self._context_window_ref_latents[region_idx:region_idx+1].to(device)
+                                        if self._step == 0:
+                                            logging.info(f"[ContextWindowRefs] Window [{window.index_list[0]}-{window.index_list[-1]}]: Injecting ref latent {region_idx} at pos 0")
+
+                                    if self._step == 0:
+                                        logging.info(f"[ContextWindowRefs]   concat_latent_image shape: {resized_actual_cond[key].shape}, ref_latent shape: {ref_latent.shape}")
+                                        logging.info(f"[ContextWindowRefs]   Before injection - pos0 mean: {resized_actual_cond[key][:, :, 0:1].mean().item():.4f}")
                                     resized_actual_cond[key][:, :, 0:1] = ref_latent
+                                    if self._step == 0:
+                                        logging.info(f"[ContextWindowRefs]   After injection - pos0 mean: {resized_actual_cond[key][:, :, 0:1].mean().item():.4f}")
+                                    injected_ref_at_pos0 = True
+                                    injected_ref_latent = ref_latent  # Store for c_concat injection
+                                elif self._step == 0:
+                                    logging.info(f"[ContextWindowRefs] Window [{window.index_list[0]}-{window.index_list[-1]}]: First window, no injection needed")
                         else:
                             resized_actual_cond[key] = cond_item.to(device)
                     # look for control
@@ -205,7 +243,26 @@ class IndexListContextHandler(ContextHandlerABC):
                             elif hasattr(cond_value, "cond") and isinstance(cond_value.cond, torch.Tensor):
                                 if  (self.dim < cond_value.cond.ndim and cond_value.cond.size(self.dim) == x_in.size(self.dim)) or \
                                     (cond_value.cond.ndim < self.dim and cond_value.cond.size(0) == x_in.size(self.dim)):
-                                    new_cond_item[cond_key] = cond_value._copy_with(window.get_tensor(cond_value.cond, device, retain_index_list=self.cond_retain_index_list))
+                                    sliced_cond = window.get_tensor(cond_value.cond, device, retain_index_list=self.cond_retain_index_list)
+                                    # Handle c_concat: if we're injecting a reference latent, update both mask and image in c_concat
+                                    # c_concat structure for Wan: [B, 20, T, H, W] = 4 mask channels + 16 image channels
+                                    # Internal mask convention (after inversion): 1.0 = keep, 0.0 = generate
+                                    if cond_key == "c_concat" and injected_ref_at_pos0 and injected_ref_latent is not None:
+                                        num_mask_channels = 4
+                                        num_image_channels = sliced_cond.shape[1] - num_mask_channels
+                                        if sliced_cond.shape[1] >= num_mask_channels and num_image_channels > 0:
+                                            if self._step == 0:
+                                                logging.info(f"[ContextWindowRefs]   c_concat sliced shape: {sliced_cond.shape}, mask channels (0:4) pos0 mean before: {sliced_cond[:, 0:4, 0:1].mean().item():.4f}")
+                                                logging.info(f"[ContextWindowRefs]   c_concat image channels (4:) pos0 mean before: {sliced_cond[:, 4:, 0:1].mean().item():.4f}")
+                                            # Fix mask: set to 1.0 (internal: keep)
+                                            sliced_cond[:, 0:num_mask_channels, 0:1] = 1.0
+                                            # Fix image: inject processed reference latent
+                                            processed_ref = self._model.process_latent_in(injected_ref_latent)
+                                            sliced_cond[:, num_mask_channels:, 0:1] = processed_ref
+                                            if self._step == 0:
+                                                logging.info(f"[ContextWindowRefs]   c_concat mask channels (0:4) pos0 mean after: {sliced_cond[:, 0:4, 0:1].mean().item():.4f}")
+                                                logging.info(f"[ContextWindowRefs]   c_concat image channels (4:) pos0 mean after: {sliced_cond[:, 4:, 0:1].mean().item():.4f}")
+                                    new_cond_item[cond_key] = cond_value._copy_with(sliced_cond)
                             elif cond_key == "num_video_frames": # for SVD
                                 new_cond_item[cond_key] = cond_value._copy_with(cond_value.cond)
                                 new_cond_item[cond_key].cond = window.context_length
@@ -214,6 +271,21 @@ class IndexListContextHandler(ContextHandlerABC):
                         resized_actual_cond[key] = cond_item
                 finally:
                     del cond_item  # just in case to prevent VRAM issues
+            # If we injected a reference latent, also set the mask at position 0 to "keep" (0.0)
+            if injected_ref_at_pos0 and "concat_mask" in resized_actual_cond:
+                mask = resized_actual_cond["concat_mask"]
+                if isinstance(mask, torch.Tensor) and mask.ndim >= 3:
+                    # concat_mask shape is typically [B, C, T, H, W] or [B, T, H, W]
+                    # Set temporal position 0 to 0.0 (keep/don't generate)
+                    if self._step == 0:
+                        logging.info(f"[ContextWindowRefs]   concat_mask shape: {mask.shape}, before pos0 mean: {mask[:, :, 0:1].mean().item():.4f}")
+                    mask[:, :, 0:1] = 0.0
+                    if self._step == 0:
+                        logging.info(f"[ContextWindowRefs]   concat_mask after pos0 mean: {mask[:, :, 0:1].mean().item():.4f}")
+                elif self._step == 0:
+                    logging.warning(f"[ContextWindowRefs]   concat_mask not a valid tensor: type={type(mask)}, ndim={mask.ndim if isinstance(mask, torch.Tensor) else 'N/A'}")
+            elif injected_ref_at_pos0 and self._step == 0:
+                logging.warning(f"[ContextWindowRefs]   No concat_mask found in conditioning after injection! Keys: {list(resized_actual_cond.keys())}")
             resized_cond.append(resized_actual_cond)
         return resized_cond
 
@@ -232,14 +304,26 @@ class IndexListContextHandler(ContextHandlerABC):
 
     def execute(self, calc_cond_batch: Callable, model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep: torch.Tensor, model_options: dict[str]):
         self._context_window_ref_latents = None
+        self._context_window_mix_latents = False
+        self._model = model  # Store model for access in get_resized_cond (needed for process_latent_in)
         for cond_list in conds:
             if cond_list:
                 for cond_entry in cond_list:
-                    if len(cond_entry) > 1 and isinstance(cond_entry[1], dict):
+                    # Handle both tuple format (tensor, dict) and direct dict format
+                    if isinstance(cond_entry, dict):
+                        ref_latents = cond_entry.get("_context_window_ref_latents")
+                        mix_latents = cond_entry.get("_context_window_mix_latents", False)
+                    elif len(cond_entry) > 1 and isinstance(cond_entry[1], dict):
                         ref_latents = cond_entry[1].get("_context_window_ref_latents")
-                        if ref_latents is not None:
-                            self._context_window_ref_latents = ref_latents
-                            break
+                        mix_latents = cond_entry[1].get("_context_window_mix_latents", False)
+                    else:
+                        ref_latents = None
+                        mix_latents = False
+                    if ref_latents is not None:
+                        self._context_window_ref_latents = ref_latents
+                        self._context_window_mix_latents = mix_latents
+                        logging.info(f"[ContextWindowRefs] Found reference latents in conditioning: shape={ref_latents.shape}, mix={mix_latents}")
+                        break
                 if self._context_window_ref_latents is not None:
                     break
 

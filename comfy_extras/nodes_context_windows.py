@@ -101,12 +101,12 @@ class ContextWindowReferences(io.ComfyNode):
             node_id="ContextWindowReferences",
             display_name="Context Window References",
             category="conditioning/video_models",
-            description="Set reference images for context window sections.",
+            description="Set reference latents for context window sections. Each latent will anchor a different section of the video when using context windows.",
             inputs=[
                 io.Conditioning.Input("positive"),
                 io.Conditioning.Input("negative"),
-                io.Vae.Input("vae"),
-                io.Image.Input("reference_images", tooltip="Batch of reference images to split across the context windows."),
+                io.Latent.Input("reference_latents", tooltip="Batch of reference latents to split across context windows. Use VAE Encode with properly sized images to create these."),
+                io.Boolean.Input("mix_latents", default=False, tooltip="When enabled, blends between adjacent reference latents based on window position instead of picking one discretely."),
             ],
             outputs=[
                 io.Conditioning.Output(display_name="positive"),
@@ -115,25 +115,19 @@ class ContextWindowReferences(io.ComfyNode):
         )
 
     @classmethod
-    def execute(cls, positive, negative, vae, reference_images):
-        num_refs = reference_images.shape[0]
-
-        ref_latents = []
-        for i in range(num_refs):
-            img = reference_images[i:i+1]
-            latent = vae.encode(img[:, :, :, :3])
-            ref_latents.append(latent)
-
-        ref_latents_tensor = torch.cat(ref_latents, dim=0)
+    def execute(cls, positive, negative, reference_latents, mix_latents=False):
+        ref_latents_tensor = reference_latents["samples"]
 
         new_positive = node_helpers.conditioning_set_values(positive, {
             "_context_window_ref_latents": ref_latents_tensor,
+            "_context_window_mix_latents": mix_latents,
         })
 
         new_negative = negative
         if negative is not None:
             new_negative = node_helpers.conditioning_set_values(negative, {
                 "_context_window_ref_latents": ref_latents_tensor,
+                "_context_window_mix_latents": mix_latents,
             })
         else:
             new_negative = new_positive
