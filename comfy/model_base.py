@@ -1258,27 +1258,22 @@ class WAN21(BaseModel):
         mask = kwargs.get("concat_mask", kwargs.get("denoise_mask", None))
         if mask is None:
             mask = torch.zeros_like(noise)[:, :4]
-            logging.info(f"[WAN21.concat_cond] No mask provided, using zeros. mask shape: {mask.shape}")
         else:
-            logging.info(f"[WAN21.concat_cond] Input mask shape: {mask.shape}, pos0 mean (ComfyUI: 0=keep, 1=gen): {mask[:, :, 0:1].mean().item():.4f}")
             if mask.shape[1] != 4:
                 mask = torch.mean(mask, dim=1, keepdim=True)
             mask = 1.0 - mask  # Invert: ComfyUI (0=keep, 1=gen) -> internal (1=keep, 0=gen)
-            logging.info(f"[WAN21.concat_cond] After inversion, pos0 mean (internal: 1=keep, 0=gen): {mask[:, :, 0:1].mean().item():.4f}")
             mask = utils.common_upscale(mask.to(device), noise.shape[-1], noise.shape[-2], "bilinear", "center")
             if mask.shape[-3] < noise.shape[-3]:
                 mask = torch.nn.functional.pad(mask, (0, 0, 0, 0, 0, noise.shape[-3] - mask.shape[-3]), mode='constant', value=0)
             if mask.shape[1] == 1:
                 mask = mask.repeat(1, 4, 1, 1, 1)
             mask = utils.resize_to_batch_size(mask, noise.shape[0])
-            logging.info(f"[WAN21.concat_cond] Final mask shape: {mask.shape}, pos0 mean: {mask[:, :, 0:1].mean().item():.4f}")
 
         concat_mask_index = kwargs.get("concat_mask_index", 0)
         if concat_mask_index != 0:
             result = torch.cat((image[:, :concat_mask_index], mask, image[:, concat_mask_index:]), dim=1)
         else:
             result = torch.cat((mask, image), dim=1)
-        logging.info(f"[WAN21.concat_cond] Result shape: {result.shape}, mask channels (0:4) pos0 mean: {result[:, 0:4, 0:1].mean().item():.4f}, image channels (4:) pos0 mean: {result[:, 4:, 0:1].mean().item():.4f}")
         return result
 
     def extra_conds(self, **kwargs):
