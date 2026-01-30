@@ -1,7 +1,9 @@
 from __future__ import annotations
 from comfy_api.latest import ComfyExtension, io
 import comfy.context_windows
+import node_helpers
 import nodes
+import torch
 
 
 class ContextWindowsManualNode(io.ComfyNode):
@@ -38,7 +40,7 @@ class ContextWindowsManualNode(io.ComfyNode):
 
     @classmethod
     def execute(cls, model: io.Model.Type, context_length: int, context_overlap: int, context_schedule: str, context_stride: int, closed_loop: bool, fuse_method: str, dim: int, freenoise: bool,
-                cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=False) -> io.Model:
+                cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=True) -> io.Model:
         model = model.clone()
         model.model_options["context_handler"] = comfy.context_windows.IndexListContextHandler(
             context_schedule=comfy.context_windows.get_matching_context_schedule(context_schedule),
@@ -86,10 +88,57 @@ class WanContextWindowsManualNode(ContextWindowsManualNode):
 
     @classmethod
     def execute(cls, model: io.Model.Type, context_length: int, context_overlap: int, context_schedule: str, context_stride: int, closed_loop: bool, fuse_method: str, freenoise: bool,
-                cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=False) -> io.Model:
+                cond_retain_index_list: list[int]=[], split_conds_to_windows: bool=True) -> io.Model:
         context_length = max(((context_length - 1) // 4) + 1, 1)  # at least length 1
         context_overlap = max(((context_overlap - 1) // 4) + 1, 0)  # at least overlap 0
         return super().execute(model, context_length, context_overlap, context_schedule, context_stride, closed_loop, fuse_method, dim=2, freenoise=freenoise, cond_retain_index_list=cond_retain_index_list, split_conds_to_windows=split_conds_to_windows)
+
+
+class ContextWindowReferences(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="ContextWindowReferences",
+            display_name="Context Window References",
+            category="conditioning/video_models",
+            description="Set reference images for context window sections.",
+            inputs=[
+                io.Conditioning.Input("positive"),
+                io.Conditioning.Input("negative"),
+                io.Vae.Input("vae"),
+                io.Image.Input("reference_images", tooltip="Batch of reference images to split across the context windows."),
+            ],
+            outputs=[
+                io.Conditioning.Output(display_name="positive"),
+                io.Conditioning.Output(display_name="negative"),
+            ],
+        )
+
+    @classmethod
+    def execute(cls, positive, negative, vae, reference_images):
+        num_refs = reference_images.shape[0]
+
+        ref_latents = []
+        for i in range(num_refs):
+            img = reference_images[i:i+1]
+            latent = vae.encode(img[:, :, :, :3])
+            ref_latents.append(latent)
+
+        ref_latents_tensor = torch.cat(ref_latents, dim=0)
+
+        new_positive = node_helpers.conditioning_set_values(positive, {
+            "_context_window_ref_latents": ref_latents_tensor,
+        })
+
+        new_negative = negative
+        if negative is not None:
+            new_negative = node_helpers.conditioning_set_values(negative, {
+                "_context_window_ref_latents": ref_latents_tensor,
+            })
+        else:
+            new_negative = new_positive
+
+        return io.NodeOutput(new_positive, new_negative)
 
 
 class ContextWindowsExtension(ComfyExtension):
@@ -97,6 +146,7 @@ class ContextWindowsExtension(ComfyExtension):
         return [
             ContextWindowsManualNode,
             WanContextWindowsManualNode,
+            ContextWindowReferences,
         ]
 
 def comfy_entrypoint():

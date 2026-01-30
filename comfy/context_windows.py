@@ -156,8 +156,15 @@ class IndexListContextHandler(ContextHandlerABC):
                         # check that tensor is the expected length - x.size(0)
                         if self.dim < cond_item.ndim and cond_item.size(self.dim) == x_in.size(self.dim):
                             # if so, it's subsetting time - tell controls the expected indeces so they can handle them
-                            actual_cond_item = window.get_tensor(cond_item)
-                            resized_actual_cond[key] = actual_cond_item.to(device)
+                            actual_cond_item = window.get_tensor(cond_item, device, retain_index_list=self.cond_retain_index_list)
+                            resized_actual_cond[key] = actual_cond_item
+                            # Inject reference latent at position 0 for non-first windows
+                            if key == "concat_latent_image" and self._context_window_ref_latents is not None:
+                                if window.index_list[0] != 0:
+                                    num_refs = self._context_window_ref_latents.shape[0]
+                                    region_idx = window.get_region_index(num_refs)
+                                    ref_latent = self._context_window_ref_latents[region_idx:region_idx+1].to(device)
+                                    resized_actual_cond[key][:, :, 0:1] = ref_latent
                         else:
                             resized_actual_cond[key] = cond_item.to(device)
                     # look for control
@@ -224,6 +231,18 @@ class IndexListContextHandler(ContextHandlerABC):
         return context_windows
 
     def execute(self, calc_cond_batch: Callable, model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep: torch.Tensor, model_options: dict[str]):
+        self._context_window_ref_latents = None
+        for cond_list in conds:
+            if cond_list:
+                for cond_entry in cond_list:
+                    if len(cond_entry) > 1 and isinstance(cond_entry[1], dict):
+                        ref_latents = cond_entry[1].get("_context_window_ref_latents")
+                        if ref_latents is not None:
+                            self._context_window_ref_latents = ref_latents
+                            break
+                if self._context_window_ref_latents is not None:
+                    break
+
         self.set_step(timestep, model_options)
         context_windows = self.get_context_windows(model, x_in, model_options)
         enumerated_context_windows = list(enumerate(context_windows))
