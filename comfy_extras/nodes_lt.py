@@ -375,11 +375,10 @@ class LTXVAddGuide(io.ComfyNode):
 
         _, _, latent_length, latent_height, latent_width = latent_image.shape
 
+        latent_downscale_factor = max(1, round(latent_downscale_factor))
         if latent_downscale_factor > 1:
             if latent_width % int(latent_downscale_factor) != 0 or latent_height % int(latent_downscale_factor) != 0:
-                raise ValueError(
-                    f"Latent spatial size {latent_width}x{latent_height} must be divisible by latent_downscale_factor {int(latent_downscale_factor)}"
-                )
+                raise ValueError(f"Latent spatial size {latent_width}x{latent_height} must be divisible by latent_downscale_factor {int(latent_downscale_factor)}")
 
         # For mid-video multi-frame guides, prepend+strip a throwaway first frame so the VAE's "first latent = 1 pixel frame" asymmetry lands on the discarded slot
         time_scale_factor = scale_factors[0]
