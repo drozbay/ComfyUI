@@ -248,7 +248,7 @@ class LTXVAddGuide(io.ComfyNode):
         images = images[:(images.shape[0] - 1) // time_scale_factor * time_scale_factor + 1]
         target_width = int(latent_width * width_scale_factor / latent_downscale_factor)
         target_height = int(latent_height * height_scale_factor / latent_downscale_factor)
-        pixels = comfy.utils.common_upscale(images.movedim(-1, 1), target_width, target_height, "bilinear", crop="disabled").movedim(1, -1)
+        pixels = comfy.utils.common_upscale(images.movedim(-1, 1), target_width, target_height, "bilinear", crop="center").movedim(1, -1)
         encode_pixels = pixels[:, :, :, :3]
         t = vae.encode(encode_pixels)
         return encode_pixels, t
