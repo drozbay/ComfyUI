@@ -430,10 +430,18 @@ class MultiTalkGetAttnMapPatch(comfy.patcher_extension.TransformerPatch):
 
 
 class MultiTalkCrossAttnPatch(comfy.patcher_extension.TransformerPatch):
-    def __init__(self, model_patch, audio_scale=1.0, ref_target_masks=None):
+    def __init__(self, model_patch, audio_scale=1.0, ref_target_masks=None, audio_embeds=None):
         self.model_patch = model_patch
         self.audio_scale = audio_scale
         self.ref_target_masks = ref_target_masks
+        self.audio_embeds = audio_embeds
+
+    def resize_for_context_window(self, window, x_in, device=None):
+        if self.audio_embeds is None:
+            return None
+        # slice audio_embeds [batch, latent_frames, context_tokens, dim] along the frames dim
+        window_audio = window.get_tensor(self.audio_embeds, device, dim=1)
+        return MultiTalkCrossAttnPatch(self.model_patch, self.audio_scale, self.ref_target_masks, window_audio)
 
     def __call__(self, kwargs):
         transformer_options = kwargs.get("transformer_options", {})
@@ -442,7 +450,10 @@ class MultiTalkCrossAttnPatch(comfy.patcher_extension.TransformerPatch):
         if block_idx is None:
             return torch.zeros_like(x)
 
-        audio_embeds = transformer_options.get("audio_embeds")
+        audio_embeds = self.audio_embeds
+        if audio_embeds is None:
+            # fallback for callers that put audio_embeds on transformer_options
+            audio_embeds = transformer_options.get("audio_embeds")
         x_ref_attn_map = transformer_options.pop("x_ref_attn_map", None)
 
         norm_x = self.model_patch.model.blocks[block_idx].norm_x(x)
