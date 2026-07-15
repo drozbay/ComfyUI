@@ -646,6 +646,17 @@ class WanUni3CCnetPatch(comfy.patcher_extension.TransformerPatch):
             render = render.expand(hidden.shape[0], -1, -1, -1, -1)
         return torch.cat([hidden, render], dim=1)
 
+    def resize_for_context_window(self, window, x_in, device=None):
+        # encode the render once at full length, return a sliced view for this window
+        target_shape = (window.total_frames,) + tuple(x_in.shape[3:])
+        render = self.prepared_render
+        if render is None or render.shape[2:] != target_shape:
+            render = self.encode_render_video(target_shape)
+            self.prepared_render = render
+        window_patch = WanUni3CCnetPatch(self.model_patch, self.render_video, self.vae, self.latent_format, self.strength, self.sigma_start, self.sigma_end)
+        window_patch.prepared_render = window.get_tensor(render, device)
+        return window_patch
+
     def __call__(self, kwargs):
         img = kwargs.get("img")
         block_index = kwargs.get("block_index")
