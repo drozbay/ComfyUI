@@ -554,6 +554,25 @@ class IndexListContextHandler(ContextHandlerABC):
             resized_cond.append(resized_actual_cond)
         return resized_cond
 
+    def get_resized_patches(self, transformer_options: dict[str], x_in: torch.Tensor, window: IndexListContextWindow, device=None) -> dict[str]:
+        """Get the per-window view from model patches that implement resize_for_context_window"""
+        patches = transformer_options.get("patches", None)
+        if not patches:
+            return None
+        resized_patches = None
+        for name, patch_list in patches.items():
+            for index, patch in enumerate(patch_list):
+                resize_method = getattr(patch, "resize_for_context_window", None)
+                if resize_method is None:
+                    continue
+                resized_patch = resize_method(window, x_in, device)
+                if resized_patch is None:
+                    continue
+                if resized_patches is None:
+                    resized_patches = {key: list(value) for key, value in patches.items()}
+                resized_patches[name][index] = resized_patch
+        return resized_patches
+
     def set_step(self, timestep: torch.Tensor, model_options: dict[str]):
         sample_sigmas = model_options["transformer_options"]["sample_sigmas"]
         current_timestep = timestep[0].to(sample_sigmas.dtype)
@@ -686,11 +705,19 @@ class IndexListContextHandler(ContextHandlerABC):
             sub_timestep = window.get_tensor(timestep, dim=0)
             sub_conds = [self.get_resized_cond(cond, x, window) for cond in conds]
 
+            # swap in per-window views of patches that resize for context windows
+            window_model_options = model_options
+            resized_patches = self.get_resized_patches(model_options["transformer_options"], x, window, device)
+            if resized_patches is not None:
+                window_model_options = model_options.copy()
+                window_model_options["transformer_options"] = model_options["transformer_options"].copy()
+                window_model_options["transformer_options"]["patches"] = resized_patches
+
             # if multimodal, patch latent_shapes in conds for correct unpacking in model
             window_state.patch_latent_shapes(sub_conds, sub_shapes)
 
             # call model on window
-            sub_conds_out = calc_cond_batch(model, sub_conds, sub_x, sub_timestep, model_options)
+            sub_conds_out = calc_cond_batch(model, sub_conds, sub_x, sub_timestep, window_model_options)
 
             # unpack outputs
             out_per_modality = [comfy.utils.unpack_latents(sub_conds_out[i], sub_shapes) for i in range(len(sub_conds_out))]

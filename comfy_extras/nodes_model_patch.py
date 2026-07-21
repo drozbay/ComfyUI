@@ -4,6 +4,7 @@ import folder_paths
 import comfy.utils
 import comfy.ops
 import comfy.model_management
+import comfy.patcher_extension
 import comfy.ldm.common_dit
 import comfy.latent_formats
 import comfy.ldm.lumina.controlnet
@@ -375,7 +376,7 @@ class AnimaLLLiteApply:
         return (model_patched,)
 
 
-class DiffSynthCnetPatch:
+class DiffSynthCnetPatch(comfy.patcher_extension.TransformerPatch):
     def __init__(self, model_patch, vae, image, strength, mask=None):
         self.model_patch = model_patch
         self.vae = vae
@@ -421,7 +422,7 @@ class DiffSynthCnetPatch:
     def models(self):
         return [self.model_patch]
 
-class ZImageControlPatch:
+class ZImageControlPatch(comfy.patcher_extension.TransformerPatch):
     def __init__(self, model_patch, vae, image, strength, inpaint_image=None, mask=None):
         self.model_patch = model_patch
         self.vae = vae
@@ -593,7 +594,7 @@ class ZImageFunControlnet(QwenImageDiffsynthControlnet):
 
     CATEGORY = "model/patch/z-image"
 
-class WanUni3CCnetPatch:
+class WanUni3CCnetPatch(comfy.patcher_extension.TransformerPatch):
     def __init__(self, model_patch, render_video, vae, latent_format, strength, sigma_start, sigma_end):
         self.model_patch = model_patch
         self.render_video = render_video
@@ -737,7 +738,7 @@ class WanUni3CControlnetApply:
         return (model_patched,)
 
 
-class UsoStyleProjectorPatch:
+class UsoStyleProjectorPatch(comfy.patcher_extension.TransformerPatch):
     def __init__(self, model_patch, encoded_image):
         self.model_patch = model_patch
         self.encoded_image = encoded_image

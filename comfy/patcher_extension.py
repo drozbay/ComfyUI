@@ -47,6 +47,25 @@ def get_all_callbacks(call_type: str, transformer_options: dict, is_model_option
         c_list.extend(c)
     return c_list
 
+class TransformerPatch:
+    """Base class for patch objects set on transformer_options via ModelPatcher.set_model_patch."""
+
+    def __call__(self, kwargs):
+        raise NotImplementedError
+
+    def to(self, device_or_dtype):
+        # called when the model's transformer_options are moved between devices
+        return self
+
+    def models(self):
+        # extra ModelPatcher objects to memory-manage alongside the model
+        return []
+
+    def resize_for_context_window(self, window, x_in, device=None):
+        # return a per-window view of this patch, or None to use it unchanged
+        return None
+
+
 class WrappersMP:
     OUTER_SAMPLE = "outer_sample"
     PREPARE_SAMPLING = "prepare_sampling"

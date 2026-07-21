@@ -1,6 +1,7 @@
 import torch
 from einops import rearrange, repeat
 import comfy
+import comfy.patcher_extension
 from comfy.ldm.modules.attention import optimized_attention
 
 
@@ -414,7 +415,7 @@ class WanMultiTalkAttentionBlock(torch.nn.Module):
         self.norm_x = operations.LayerNorm(in_dim, device=device, dtype=dtype, elementwise_affine=True)
 
 
-class MultiTalkGetAttnMapPatch:
+class MultiTalkGetAttnMapPatch(comfy.patcher_extension.TransformerPatch):
     def __init__(self, ref_target_masks=None):
         self.ref_target_masks = ref_target_masks
 
@@ -428,7 +429,7 @@ class MultiTalkGetAttnMapPatch:
         return x
 
 
-class MultiTalkCrossAttnPatch:
+class MultiTalkCrossAttnPatch(comfy.patcher_extension.TransformerPatch):
     def __init__(self, model_patch, audio_scale=1.0, ref_target_masks=None):
         self.model_patch = model_patch
         self.audio_scale = audio_scale

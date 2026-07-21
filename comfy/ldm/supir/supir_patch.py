@@ -1,8 +1,9 @@
 import torch
+import comfy.patcher_extension
 from comfy.ldm.modules.diffusionmodules.openaimodel import Upsample
 
 
-class SUPIRPatch:
+class SUPIRPatch(comfy.patcher_extension.TransformerPatch):
     """
     Holds GLVControl (control encoder) + project_modules (ZeroSFT/ZeroCrossAttn adapters).
     Runs GLVControl lazily on first patch invocation per step, applies adapters through
